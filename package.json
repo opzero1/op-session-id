@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-session-id",
+  "version": "0.1.0",
+  "description": "opencode TUI plugin: /id copies the current session ID; prints it again when opencode exits.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "bun run scripts/dev-sandbox.ts"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "session-id"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.17.0",
+    "@types/bun": "^1.1.0",
+    "typescript": "^5"
+  }
+}
