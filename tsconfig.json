@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "dev", "scripts"]
+  "include": ["index.ts", "tui.ts", "src", "scripts"]
 }

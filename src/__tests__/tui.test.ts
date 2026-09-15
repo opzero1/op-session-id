@@ -1,118 +1,78 @@
 import { expect, test } from "bun:test"
-import type { TuiPluginApi, TuiToast } from "@opencode-ai/plugin/tui"
-import { installSessionIdPlugin } from "../index.js"
+import type { ClipboardWriteResult } from "@opentui/core"
+import type { Route, UI } from "@opencode/plugin/tui/context"
+import { sessionIdCommand } from "../command.js"
 
-type PaletteCommand = {
-  slashName?: string
-  run: () => boolean
+type ToastOptions = Parameters<UI["toast"]["show"]>[0]
+const written: ClipboardWriteResult = {
+  host: { status: "written" },
+  terminal: { status: "not-attempted", capability: "unknown" },
 }
 
-function harness() {
-  const toasts: TuiToast[] = []
-  const commands: PaletteCommand[] = []
-  const handlers = new Map<string, (event: unknown) => void>()
-  const disposers: Array<() => void | Promise<void>> = []
-  const route: { current: { name: string; params?: Record<string, unknown> } } = { current: { name: "home" } }
-  const api = {
-    route,
-    ui: {
-      toast: (input: TuiToast) => {
-        toasts.push(input)
-      },
-    },
-    keymap: {
-      registerLayer: (layer: { commands?: PaletteCommand[] }) => {
-        commands.push(...(layer.commands ?? []))
-        return () => {}
-      },
-    },
-    event: {
-      on: (type: string, handler: (event: unknown) => void) => {
-        handlers.set(type, handler)
-        return () => {}
-      },
-    },
-    lifecycle: {
-      signal: new AbortController().signal,
-      onDispose: (fn: () => void | Promise<void>) => {
-        disposers.push(fn)
-        return () => {}
-      },
-    },
-  }
-  return { api: api as unknown as TuiPluginApi, toasts, commands, handlers, disposers, route }
-}
-
-// Clipboard writes are gated on process.stdout.isTTY; force the non-TTY path
-// so interactive `bun test` runs never touch the real clipboard.
-async function withNonTTY(fn: () => void | Promise<void>) {
-  const descriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY")
-  Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true })
-  try {
-    await fn()
-  } finally {
-    if (descriptor) Object.defineProperty(process.stdout, "isTTY", descriptor)
-  }
-}
-
-test("registers a palette command with /id slash", async () => {
-  const { api, commands } = harness()
-  await installSessionIdPlugin(api)
-  expect(commands.length).toBe(1)
-  expect(commands[0]!.slashName).toBe("id")
-})
-
-test("/id without a session shows an error toast", async () => {
-  const { api, toasts, commands } = harness()
-  await installSessionIdPlugin(api)
-  commands[0]!.run()
-  expect(toasts.length).toBe(1)
-  expect(toasts[0]!.variant).toBe("error")
-})
-
-test("/id on the session route toasts the full session ID", async () => {
-  const { api, toasts, commands, route } = harness()
-  await installSessionIdPlugin(api)
-  route.current = { name: "session", params: { sessionID: "ses_route123" } }
-  await withNonTTY(() => {
-    commands[0]!.run()
+function harness(write: (text: string) => Promise<ClipboardWriteResult> = async () => written) {
+  const toasts: ToastOptions[] = []
+  const copies: string[] = []
+  let route: Route = { type: "session", sessionID: "ses_clipboard_test" }
+  const command = sessionIdCommand({
+    router: { current: () => route },
+    toast: { show: (toast) => { toasts.push(toast) } },
+    clipboard: { writeText: async (text) => { copies.push(text); return write(text) } },
   })
-  expect(toasts[0]!.variant).toBe("success")
-  expect(toasts[0]!.message).toContain("ses_route123")
+  return { command, toasts, copies, navigate(next: Route) { route = next } }
+}
+
+test("registers /session-id and /id in the palette", () => {
+  const { command } = harness()
+  expect(command.slash).toEqual({ name: "session-id", aliases: ["id"] })
+  expect(command.palette).toBe(true)
 })
 
-test("/id falls back to the session tracked from events", async () => {
-  const { api, toasts, commands, handlers } = harness()
-  await installSessionIdPlugin(api)
-  handlers.get("tui.session.select")!({ properties: { sessionID: "ses_event456" } })
-  await withNonTTY(() => {
-    commands[0]!.run()
-  })
-  expect(toasts[0]!.message).toContain("ses_event456")
+test("does not copy without a selected session", async () => {
+  const h = harness()
+  h.navigate({ type: "home" })
+  await h.command.run()
+  expect(h.copies).toEqual([])
+  expect(h.toasts).toEqual([{ message: "Open a session to copy its ID.", variant: "info" }])
 })
 
-test("exit handler prints session ID and resume command; dispose removes it", async () => {
-  const before = process.listeners("exit")
-  const { api, handlers, disposers } = harness()
-  await installSessionIdPlugin(api)
-  const added = process.listeners("exit").filter((listener) => !before.includes(listener))
-  expect(added.length).toBe(1)
+test("waits for clipboard completion before reporting success", async () => {
+  const copy = Promise.withResolvers<ClipboardWriteResult>()
+  const h = harness(() => copy.promise)
+  const running = h.command.run()
+  expect(h.toasts).toEqual([])
+  copy.resolve(written)
+  await running
+  expect(h.copies).toEqual(["ses_clipboard_test"])
+  expect(h.toasts).toEqual([{
+    title: "Session ID copied", message: "ses_clipboard_test", variant: "success", duration: 4000,
+  }])
+})
 
-  handlers.get("session.status")!({ properties: { sessionID: "ses_exit789" } })
-  const output: string[] = []
-  const write = process.stderr.write
-  process.stderr.write = ((chunk: string | Uint8Array) => {
-    output.push(String(chunk))
-    return true
-  }) as typeof process.stderr.write
-  try {
-    added[0]!(0)
-  } finally {
-    process.stderr.write = write
-  }
-  expect(output.join("")).toContain("opencode session: ses_exit789")
-  expect(output.join("")).toContain("opencode --session ses_exit789")
+test("reads the current route on each invocation", async () => {
+  const h = harness()
+  h.navigate({ type: "session", sessionID: "ses_second" })
+  await h.command.run()
+  expect(h.copies).toEqual(["ses_second"])
+})
 
-  for (const dispose of disposers) await dispose()
-  expect(process.listeners("exit")).toEqual(before)
+test.each(["unsupported", "cancelled", "timed-out"] as const)("reports %s without claiming success", async (status) => {
+  const h = harness(async () => ({ host: { status }, terminal: { status: "not-attempted", capability: "unknown" } }))
+  await h.command.run()
+  expect(h.toasts[0]?.variant).toBe("error")
+})
+
+test("reports a clipboard exception as an error toast", async () => {
+  const h = harness(async () => { throw new Error("clipboard unavailable") })
+  await h.command.run()
+  expect(h.toasts[0]?.variant).toBe("error")
+})
+
+test("distinguishes unacknowledged terminal delivery from host success", async () => {
+  const h = harness(async () => ({
+    host: { status: "not-attempted" },
+    terminal: { status: "attempted", capability: "supported" },
+  }))
+  await h.command.run()
+  expect(h.toasts[0]?.variant).toBe("info")
+  expect(h.toasts[0]?.title).toBe("Session ID sent to terminal clipboard")
 })
